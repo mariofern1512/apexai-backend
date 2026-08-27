@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 import yfinance as yf
-import pandas_ta as ta
+import pandas_ta_classic as ta
 import google.generativeai as genai
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
