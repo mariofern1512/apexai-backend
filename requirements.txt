@@ -2,6 +2,6 @@ fastapi
 uvicorn
 yfinance
 pandas-ta-classic
-google-generativeai
-python-jose[cryptography]
+google-genai
 pydantic
+requests
