@@ -8,11 +8,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://192.168.29.26:3001",
-        "http://localhost:3001",
-        "https://apexai-backend-8o1y.onrender.com"
-    ],
+    allow_origins=[*],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
