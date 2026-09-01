@@ -34,6 +34,7 @@ import yfinance as yf
 from cachetools import TTLCache
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types as genai_types
 from pydantic import BaseModel, Field
@@ -58,6 +59,14 @@ class Settings(BaseSettings):
     allowed_origins: str = Field(
         default="http://localhost:3000",
         description="Comma-separated list, e.g. 'https://app.example.com,https://staging.example.com'",
+    )
+    allowed_origin_regex: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional regex for origins that change per-deploy, e.g. Vercel preview URLs. "
+            r"Example: 'https://apexai-frontend-.*\.vercel\.app' matches every preview "
+            "deployment for that project without needing ALLOWED_ORIGINS updated on every push."
+        ),
     )
     cache_ttl_seconds: int = 60
     cache_max_size: int = 500
@@ -108,10 +117,28 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list,
+    allow_origin_regex=settings.allowed_origin_regex,
     allow_credentials=True,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """
+    Safety net for anything that isn't caught by an explicit try/except in a
+    route. This matters specifically for CORS: Starlette's CORSMiddleware
+    only attaches Access-Control-Allow-Origin to responses that complete
+    normally through the middleware stack. An exception that propagates
+    unhandled bypasses that entirely, so the browser sees a response with
+    NO CORS header at all and reports a (misleading) CORS error — even
+    though CORS is configured correctly. Catching everything here and
+    returning a normal JSONResponse ensures every response, including
+    crashes, goes back out through CORSMiddleware properly.
+    """
+    logger.exception("Unhandled exception on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error."})
 
 # --------------------------------------------------------------------------- #
 # Response models
@@ -493,8 +520,19 @@ async def analyze_stock(request: Request, ticker: str):
         return cached_response.model_copy(update={"cached": True})
 
     symbol, hist = await _resolve_ticker(ticker)
-    metrics = _compute_metrics(hist)
-    technicals = _analyze_technicals(hist, metrics["latest_close"])
+
+    try:
+        metrics = _compute_metrics(hist)
+        technicals = _analyze_technicals(hist, metrics["latest_close"])
+    except Exception as e:
+        # Guards against sparse/unusual data (e.g. a recently-listed ticker with
+        # too few sessions, or an instrument yfinance returns in an unexpected
+        # shape) crashing the route with a raw, uncaught exception.
+        logger.error("Metrics/technicals computation failed for %s: %s", symbol, e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not compute analysis for '{symbol}' — the price history returned was insufficient or malformed.",
+        )
 
     try:
         ai_analysis = await _generate_ai_analysis(symbol, metrics["latest_close"])
