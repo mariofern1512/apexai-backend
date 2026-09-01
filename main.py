@@ -167,6 +167,8 @@ class AIAnalysis(BaseModel):
     summary: str
     bullish_points: list[str]
     bearish_points: list[str]
+    sentiment_score: int  # 0-100, Gemini's own read given price action + its analysis
+    sentiment_label: str  # "Positive" | "Neutral" | "Negative"
 
 
 class TechnicalIndicators(BaseModel):
@@ -461,15 +463,22 @@ _AI_RESPONSE_SCHEMA = {
         "summary": {"type": "string"},
         "bullish_points": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3},
         "bearish_points": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2},
+        "sentiment_score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "sentiment_label": {"type": "string", "enum": ["Positive", "Neutral", "Negative"]},
     },
-    "required": ["summary", "bullish_points", "bearish_points"],
+    "required": ["summary", "bullish_points", "bearish_points", "sentiment_score", "sentiment_label"],
 }
 
 
-def _generate_ai_analysis_sync(symbol: str, latest_close: float) -> AIAnalysis:
+def _generate_ai_analysis_sync(symbol: str, latest_close: float, technical_context: str) -> AIAnalysis:
     prompt = (
-        f"Analyze the stock {symbol} with current close price {latest_close}. "
-        "Provide a professional, financial-focused market outlook."
+        f"Analyze the stock {symbol} with current close price {latest_close}.\n"
+        f"Computed technical context: {technical_context}\n\n"
+        "Provide a professional, financial-focused market outlook grounded in this "
+        "technical context. Also give an overall sentiment_score (0-100, where 0 is "
+        "extremely negative, 50 is neutral, 100 is extremely positive) and a "
+        "sentiment_label reflecting your own read of the stock's outlook — this is "
+        "your qualitative assessment, not a claim about live news or social media data."
     )
     response = genai_client.models.generate_content(
         model=settings.gemini_model,
@@ -488,8 +497,8 @@ def _generate_ai_analysis_sync(symbol: str, latest_close: float) -> AIAnalysis:
     wait=wait_exponential(multiplier=1, min=1, max=8),
     retry=retry_if_exception_type(Exception),
 )
-async def _generate_ai_analysis(symbol: str, latest_close: float) -> AIAnalysis:
-    return await asyncio.to_thread(_generate_ai_analysis_sync, symbol, latest_close)
+async def _generate_ai_analysis(symbol: str, latest_close: float, technical_context: str) -> AIAnalysis:
+    return await asyncio.to_thread(_generate_ai_analysis_sync, symbol, latest_close, technical_context)
 
 
 # --------------------------------------------------------------------------- #
@@ -535,7 +544,14 @@ async def analyze_stock(request: Request, ticker: str):
         )
 
     try:
-        ai_analysis = await _generate_ai_analysis(symbol, metrics["latest_close"])
+        technical_context = (
+            f"verdict={technicals['verdict']}, confidence={technicals['confidence']}%, "
+            f"RSI14={technicals['technical'].rsi14}, EMA20={technicals['technical'].ema20}, "
+            f"EMA50={technicals['technical'].ema50}, MACD histogram={technicals['technical'].macd_histogram}, "
+            f"annualized volatility={technicals['technical'].volatility_annualized_pct}%, "
+            f"risk={technicals['risk_label']}"
+        )
+        ai_analysis = await _generate_ai_analysis(symbol, metrics["latest_close"], technical_context)
     except Exception as e:
         logger.error("Gemini analysis failed for %s after retries: %s", symbol, e)
         raise HTTPException(status_code=502, detail="AI analysis provider is currently unavailable.")
